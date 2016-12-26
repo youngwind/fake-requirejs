@@ -50,14 +50,18 @@ let require, define;
             // 只有传了回调
             cb = name;
             name = getCurrentModuleName();
-        } else if (Array.isArray(name) && isFunction(cb)) {
+        } else if (Array.isArray(name) && isFunction(dep)) {
             // 传了依赖和回调
+            cb = dep;
+            dep = name;
+            name = getCurrentModuleName();
         } else if (isString(name) && Array.isArray(name) && isFunction(cb)) {
             // 传了名字,依赖和回调
         }
 
         let module = modules[name];
         module.name = name;
+        module.dep = dep;
         module.cb = cb;
         module.errorFn = errorFn;
         module.analyzeDep();
