@@ -71,10 +71,21 @@ let require, define;
             src,
             name,
             cb: callback,
-            exports: callback(),
+            // exports: callback(),
             id: ++mid
         };
         globalModules[name] = module;
+
+        if (deps) {
+            // TODO 此处有问题, 因为deps可能已经准备好了,这时候listen还管用吗?
+            // moduleEvent.listen(deps, callback);
+            deps.forEach((dep) => {
+               loadModule(dep);
+            });
+        } else {
+            module.exports = callback();
+        }
+
     };
 
     // 使用观察者模式监听各个模块的加载情况
