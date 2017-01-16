@@ -9,16 +9,17 @@ let require, define;
         return;
     }
     let mid = 0;                // 模块id
+    let tid = 0;                // 任务id
     let modules = {};           // 模块列表集合
-    let mainEntryModule;        // 主入口模块
-    let mapDepToModule = {};    // 依赖→模块映射map
+    let tasks = {};
+    let mapDepToModuleOrTask = {};    // 依赖→模块映射map
 
     window.modules = modules;           // 调试语句
-    window.mapDepToModule = mapDepToModule;  // 调试语句
+    window.tasks = tasks;
+    window.mapDepToModuleOrTask = mapDepToModuleOrTask;  // 调试语句
 
     /**
      * 入口文件的函数
-     * TODO: 此函数是否能被多次调用?
      * @param dep {Array} 依赖模块数组(可省略)
      * @param cb {Function} 成功回调函数
      * @param errorFn {Function} 失败回调函数(可省略)
@@ -29,11 +30,8 @@ let require, define;
             cb = dep;
             dep = undefined;
         }
-        modules[mainEntryModule.name] = mainEntryModule;
-        mainEntryModule.dep = dep;
-        mainEntryModule.cb = cb;
-        mainEntryModule.errorFn = errorFn;
-        mainEntryModule.analyzeDep();
+        let task = new Task(dep, cb, errorFn);
+        task.analyzeDep();
     };
 
 
@@ -71,7 +69,7 @@ let require, define;
     Module.STATUS = {
         INITED: 1,      // 初始化完成
         FETCHING: 2,    // 正在网络请求
-        FETCHED: 3,     // 网络请求结束
+        FETCHED: 3,     // 网络请求结束(此状态暂时用不到)
         EXECUTING: 4,   // 准备开始运算模块
         EXECUTED: 5,    // 模块运算完毕
         ERROR: 6        // 模块发生错误
@@ -130,10 +128,30 @@ let require, define;
     /**
      * 分析模块的依赖
      * 1. 计算模块依赖的数量:depCount
-     * 2. 生成依赖→模块映射表: mapDepToModule
+     * 2. 生成依赖→模块映射表: mapDepToModuleOrTask
      */
     Module.prototype.analyzeDep = function () {
         let depCount = this.dep ? this.dep.length : 0;
+
+        // 处理dep中包含'require'的特殊情况
+        let requireInDep = (this.dep || []).indexOf('require');
+        if (requireInDep !== -1) {
+            depCount--;
+            this.requireInDep = requireInDep;
+            this.dep.splice(requireInDep, 1);
+        }
+
+        // 处理循环依赖情况
+        let cycleArray = this.checkCycle();
+        if (cycleArray) {
+            depCount = depCount - cycleArray.length;
+        }
+
+        if (depCount === 0) {
+            this.execute();
+            return;
+        }
+
         Object.defineProperty(this, 'depCount', {
             get() {
                 return depCount;
@@ -141,7 +159,11 @@ let require, define;
             set(newDepCount) {
                 depCount = newDepCount;
                 if (newDepCount === 0) {
-                    console.log('此模块', this.name, '的依赖已经全部准备好');
+                    if (this.mid) {
+                        console.log(`模块${this.name}的依赖已经全部准备好`);
+                    } else if (this.tid) {
+                        console.log(`任务${this.tid}的依赖已经全部准备好`);
+                    }
                     this.execute();
                 }
             }
@@ -151,14 +173,30 @@ let require, define;
         if (!this.depCount) return;
 
         this.dep.forEach((depModuleName) => {
-            let module = new Module(depModuleName);
-            modules[module.name] = module;
-
-            if (!mapDepToModule[depModuleName]) {
-                mapDepToModule[depModuleName] = [];
+            if (!modules[depModuleName]) {
+                let module = new Module(depModuleName);
+                modules[module.name] = module;
             }
-            mapDepToModule[depModuleName].push(this);
+
+            if (!mapDepToModuleOrTask[depModuleName]) {
+                mapDepToModuleOrTask[depModuleName] = [];
+            }
+            mapDepToModuleOrTask[depModuleName].push(this);
         });
+    };
+
+    /**
+     * 检查模块循环依赖
+     * @returns {Array|undefined} 如果模块出现循环依赖的话,返回循环依赖的模块(以数组形式)
+     */
+    Module.prototype.checkCycle = function () {
+        let cycleDep = [];
+        for (let depModuleName of (this.dep || [])) {
+            if (mapDepToModuleOrTask[this.name] && mapDepToModuleOrTask[this.name].indexOf(modules[depModuleName]) !== -1) {
+                cycleDep.push(depModuleName);
+            }
+        }
+        return cycleDep.length ? cycleDep : undefined;
     };
 
     /**
@@ -170,10 +208,19 @@ let require, define;
         let arg = (this.dep || []).map((dep) => {
             return modules[dep].exports;
         });
+
+        // 插入require到回调函数的参数列表中
+        if (this.requireInDep !== -1 && this.requireInDep !== undefined) {
+            arg.splice(this.requireInDep, 0, require);
+        }
+
         this.exports = this.cb.apply(this, arg);
         this.callHook('EXECUTED');
-        console.log(`模块${this.name}执行完成`);
-
+        if (this.tid) {
+            console.log(`任务${this.tid}执行完成`);
+        } else if (this.mid) {
+            console.log(`模块${this.name}执行完成`);
+        }
     };
 
 
@@ -193,7 +240,7 @@ let require, define;
                     status = newStatus;
                     if (status === 5) {
                         // 该模块已经executed
-                        let depedModules = mapDepToModule[this.name];
+                        let depedModules = mapDepToModuleOrTask[this.name];
                         if (!depedModules) return;
                         depedModules.forEach((module) => {
                             setTimeout(() => {
@@ -208,9 +255,39 @@ let require, define;
         }
     };
 
+    /**
+     * 任务构造函数
+     * 任务是与模块不一样的概念。每调用一次require函数,相当于新建一个任务
+     * 而任务与模块又有类似的地方,所以我让任务继承模块
+     * @param dep {Array} 依赖数组
+     * @param cb {Function} 成功回调函数
+     * @param errorFn {Function} 失败回调函数
+     * @constructor
+     */
+    function Task(dep, cb, errorFn) {
+        this.tid = ++tid;
+        this.init(dep, cb, errorFn);
+    }
+
+    Task.prototype = Object.create(Module.prototype);
+
+    /**
+     * 初始化任务
+     * @param dep {Array} 依赖数组
+     * @param cb {Function} 成功回调函数
+     * @param errorFn {Function} 失败回调函数
+     */
+    Task.prototype.init = function (dep, cb, errorFn) {
+        this.dep = dep;
+        this.cb = cb;
+        this.errorFn = errorFn;
+        tasks[this.tid] = this;
+    };
+
 
     // 启动主入口加载流程
-    mainEntryModule = new Module(getMainEntryModuleName());
+    let mainEntryModule = new Module(getMainEntryModuleName());
+    modules[mainEntryModule.name] = mainEntryModule;
 
     ////////////////////////////////////////////////////////////////////////////////
     //////////////////////////////下面是工具类函数/////////////////////////////////////

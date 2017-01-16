@@ -1,6 +1,4 @@
-// 最简单的例子
-
-require(['a', 'b'], function (a, b) {
+require(['a','b'], function (a, b) {
     a.hi();
     b.goodbye();
 }, function () {
